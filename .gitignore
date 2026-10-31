@@ -1,0 +1,15 @@
+# Binaries and build artifacts
+dist/
+.tmp/
+*.exe
+*.test
+*.syso
+
+# Generated keys and certificates from ad-hoc runs
+*.pem
+*.crt
+*.key
+*.p12
+*.pfx
+test-out/
+
