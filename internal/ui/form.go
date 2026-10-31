@@ -14,38 +14,28 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// FormData holds the interactive user choices from the TUI form.
 // FormData holds interactive user choices from the TUI form.
 type FormData struct {
-	Role         string
-	KeyType      string
-	CommonName   string
-	Organization string
-	Unit         string
-	Country      string
-	SANDNS       string
-	SANIP        string
-	ValidityDays string
-	OutputDir    string
-	NamingScheme string
-	GenPKCS12    bool
-	P12Password  string
-	Role            string
-	KeyType         string
-	CommonName      string
-	RootCAName      string
-	Organization    string
-	Unit            string
-	Country         string
-	SANDNS          string
-	SANIP           string
-	ValidityDays    string
-	OutputDir       string
-	NamingScheme    string
-	GenPKCS12       bool
-	P12Password     string
-	InstallOS       bool
-	InstallBrowsers bool
+	Role                string
+	KeyType             string
+	CommonName          string
+	RootCAName          string
+	RootCAValidityYears string
+	ExistingCACert      string
+	ExistingCAKey       string
+	ExistingCAPass      string
+	Organization        string
+	Unit                string
+	Country             string
+	SANDNS              string
+	SANIP               string
+	ValidityDays        string
+	OutputDir           string
+	NamingScheme        string
+	GenPKCS12           bool
+	P12Password         string
+	InstallOS           bool
+	InstallBrowsers     bool
 }
 
 // Banner returns the styled application header.
@@ -64,76 +54,102 @@ func Banner() string {
 	secBadge := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#04B575")).
 		Bold(true).
-		SetString("[EDR-Safe / Air-Gapped / Zero-Network]")
 		SetString("[EDR-Safe / Air-Gapped / Zero-Network / Full PKI]")
 
 	header := fmt.Sprintf("%s  %s\n%s\n",
 		titleStyle.Render("CERTGEN"),
 		secBadge.Render(),
-		subTitleStyle.Render("Production-Grade Self-Signed X.509 Certificate & Key Generator"),
 		subTitleStyle.Render("Production-Grade Self-Signed X.509 PKI & Certificate Authority Generator"),
 	)
 	return header
 }
 
 // RunInteractiveForm prompts the user for certificate generation settings via Charm Huh.
-func RunInteractiveForm() (*cert.Config, error) {
 func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 	fmt.Println(Banner())
 
+	// Auto-detect if an existing Root CA is present in current folder or parent
+	detectedCA := cert.DetectExistingCA()
+
+	defaultRole := string(cert.RoleCALeaf)
+	defaultCACert := "./rootCA.pem"
+	defaultCAKey := "./rootCA-key.pem"
+
+	if detectedCA != nil {
+		defaultRole = string(cert.RoleExistingCA)
+		defaultCACert = detectedCA.CertPath
+		defaultCAKey = detectedCA.KeyPath
+
+		noticeStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#00D7D7")).
+			Padding(0, 1).
+			MarginBottom(1)
+
+		badge := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00D7D7")).Render("✔ EXISTING ROOT CA DETECTED:")
+		details := fmt.Sprintf("%s %q found in %s (Valid until %s)",
+			badge,
+			detectedCA.CommonName,
+			detectedCA.CertPath,
+			detectedCA.ExpiresAt.Format("2006-01-02"),
+		)
+		fmt.Println(noticeStyle.Render(details))
+	}
+
 	data := FormData{
-		Role:         string(cert.RoleLeaf),
-		KeyType:      string(cert.KeyTypeECDSAP256),
-		CommonName:   "localhost",
-		Organization: "Internal / Dev",
-		Unit:         "",
-		Country:      "US",
-		SANDNS:       "localhost, 127.0.0.1",
-		SANIP:        "127.0.0.1, ::1",
-		ValidityDays: "365",
-		OutputDir:    "./",
-		NamingScheme: "pem",
-		GenPKCS12:    false,
-		P12Password:  "",
-		Role:            string(cert.RoleCALeaf),
-		KeyType:         string(cert.KeyTypeECDSAP256),
-		CommonName:      "localhost",
-		RootCAName:      "Internal Development Root CA",
-		Organization:    "Internal / Dev",
-		Unit:            "",
-		Country:         "US",
-		SANDNS:          "localhost, 127.0.0.1",
-		SANIP:           "127.0.0.1, ::1",
-		ValidityDays:    "365",
-		OutputDir:       "./",
-		NamingScheme:    "pem",
-		GenPKCS12:       false,
-		P12Password:     "",
-		InstallOS:       true,
-		InstallBrowsers: true,
+		Role:                defaultRole,
+		KeyType:             string(cert.KeyTypeECDSAP256),
+		CommonName:          "localhost",
+		RootCAName:          "Internal Development Root CA",
+		RootCAValidityYears: "10",
+		ExistingCACert:      defaultCACert,
+		ExistingCAKey:       defaultCAKey,
+		Organization:        "Internal / Dev",
+		Unit:                "",
+		Country:             "US",
+		SANDNS:              "localhost, 127.0.0.1",
+		SANIP:               "127.0.0.1, ::1",
+		ValidityDays:        "365",
+		OutputDir:           "./",
+		NamingScheme:        "pem",
+		GenPKCS12:           false,
+		P12Password:         "",
+		InstallOS:           detectedCA == nil,
+		InstallBrowsers:     detectedCA == nil,
 	}
 
 	theme := huh.ThemeCharm()
 
-	// Step 1: Role & Cryptographic Algorithm
+	// Build Role options
+	var roleOptions []huh.Option[string]
+	if detectedCA != nil {
+		roleOptions = append(roleOptions,
+			huh.NewOption(fmt.Sprintf("Sign with Detected Root CA (%s) [Recommended]", detectedCA.CommonName), string(cert.RoleExistingCA)),
+			huh.NewOption("Generate NEW Root CA + Signed Leaf Certificate", string(cert.RoleCALeaf)),
+			huh.NewOption("Sign with another Existing Root CA (Specify custom paths)", "custom-existing-ca"),
+			huh.NewOption("Root / Intermediate CA Only - For signing other certificates", string(cert.RoleCA)),
+			huh.NewOption("Standalone Self-Signed Leaf Only - Direct self-signed without CA", string(cert.RoleLeaf)),
+		)
+	} else {
+		roleOptions = append(roleOptions,
+			huh.NewOption("Generate NEW Root CA + Signed Leaf Certificate (Recommended)", string(cert.RoleCALeaf)),
+			huh.NewOption("Sign with an Existing Root CA (Specify path to rootCA.pem & rootCA-key.pem)", string(cert.RoleExistingCA)),
+			huh.NewOption("Root / Intermediate CA Only - For signing other certificates", string(cert.RoleCA)),
+			huh.NewOption("Standalone Self-Signed Leaf Only - Direct self-signed without CA", string(cert.RoleLeaf)),
+		)
+	}
+
+	// Step 1: Role & Key Algorithm
 	groupRoleAndKey := huh.NewGroup(
 		huh.NewSelect[string]().
-			Title("Certificate Role").
-			Description("Choose whether this certificate acts as an End-Entity (Leaf) or Certificate Authority (CA)").
 			Title("Certificate Hierarchy / Role").
-			Description("Choose generation mode. Full PKI generates Root CA and issues signed leaf certificate").
-			Options(
-				huh.NewOption("Server & Client Certificate (Leaf) - Standard TLS endpoint", string(cert.RoleLeaf)),
-				huh.NewOption("Root / Intermediate CA - Signs other certificates", string(cert.RoleCA)),
-				huh.NewOption("Root CA + Signed Leaf Certificate (Recommended - Generates Root CA & signed cert)", string(cert.RoleCALeaf)),
-				huh.NewOption("Root / Intermediate CA Only - For signing other certificates", string(cert.RoleCA)),
-				huh.NewOption("Standalone Self-Signed Leaf Only - Direct self-signed without CA", string(cert.RoleLeaf)),
-			).
+			Description("Choose generation mode").
+			Options(roleOptions...).
 			Value(&data.Role),
 
 		huh.NewSelect[string]().
 			Title("Key Algorithm & Size").
-			Description("Select cryptographic key type").
+			Description("Select cryptographic key type for the certificate").
 			Options(
 				huh.NewOption("ECDSA P-256 (Fast, Modern, Recommended)", string(cert.KeyTypeECDSAP256)),
 				huh.NewOption("ECDSA P-384 (High Security Elliptic Curve)", string(cert.KeyTypeECDSAP384)),
@@ -148,7 +164,7 @@ func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 		huh.NewInput().
 			Title("Common Name (CN)").
 			Description("Primary domain name or service identifier").
-			Placeholder("e.g. localhost, api.internal, or Root CA Name").
+			Placeholder("e.g. localhost, api.internal, or service name").
 			Value(&data.CommonName).
 			Validate(func(s string) error {
 				if strings.TrimSpace(s) == "" {
@@ -156,11 +172,6 @@ func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 				}
 				return nil
 			}),
-
-		huh.NewInput().
-			Title("Root CA Common Name").
-			Description("Name of the Root Certification Authority (used when generating CA + Leaf)").
-			Value(&data.RootCAName),
 
 		huh.NewInput().
 			Title("Organization (O)").
@@ -218,32 +229,28 @@ func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 	// Step 4: Validity & Output Configuration
 	groupOutput := huh.NewGroup(
 		huh.NewInput().
-			Title("Validity Duration (Days)").
-			Description("Number of days before certificate expires [Default: 365, Max: 3650]").
-			Description("Number of days before leaf certificate expires [Default: 365, Max: 3650]").
+			Title("Leaf Certificate Validity Duration (Days)").
+			Description("Number of days before leaf certificate expires [Default: 365 (1 year), Max: 3650]").
 			Value(&data.ValidityDays).
 			Validate(func(s string) error {
 				n, err := strconv.Atoi(strings.TrimSpace(s))
 				if err != nil || n <= 0 {
-					return errors.New("validity duration must be a positive number of days")
+					return errors.New("leaf validity duration must be a positive number of days")
 				}
 				if n > 3650 {
-					return errors.New("validity duration cannot exceed 3650 days (10 years)")
+					return errors.New("leaf validity duration cannot exceed 3650 days (10 years)")
 				}
 				return nil
 			}),
 
 		huh.NewInput().
 			Title("Output Directory").
-			Description("Folder where certificate and key will be written").
-			Description("Folder where Root CA, certificates, and keys will be written").
+			Description("Folder where certificates and keys will be written").
 			Value(&data.OutputDir),
 
 		huh.NewSelect[string]().
 			Title("Output File Naming Scheme").
 			Options(
-				huh.NewOption("cert.pem & key.pem (Standard PEM format)", "pem"),
-				huh.NewOption("cert.crt & key.key (Web Server / Ingress convention)", "crt"),
 				huh.NewOption("cert.pem, rootCA.pem & key.pem (Standard PEM format)", "pem"),
 				huh.NewOption("cert.crt, rootCA.crt & key.key (Web Server / Ingress convention)", "crt"),
 			).
@@ -251,34 +258,107 @@ func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 
 		huh.NewConfirm().
 			Title("Generate PKCS#12 bundle (.p12 / .pfx)?").
-			Description("Useful for Windows CertMgr, IIS, or Java truststores").
 			Description("Contains leaf certificate, private key, and Root CA chain").
 			Value(&data.GenPKCS12),
 	)
 
 	form := huh.NewForm(groupRoleAndKey, groupIdentity, groupSANs, groupOutput).
-	// Step 5: Trust Store & Browser Installation
-	groupTrust := huh.NewGroup(
-		huh.NewConfirm().
-			Title("Install Root CA into OS Trust Store?").
-			Description("Enables automatic trust in Windows (10/11/Server), Linux (Ubuntu/Debian/RHEL/etc.)").
-			Value(&data.InstallOS),
-
-		huh.NewConfirm().
-			Title("Install Root CA for Browsers?").
-			Description("Enables automatic trust in Google Chrome, Microsoft Edge, and Mozilla Firefox").
-			Value(&data.InstallBrowsers),
-	)
-
-	form := huh.NewForm(groupRoleAndKey, groupIdentity, groupSANs, groupOutput, groupTrust).
 		WithTheme(theme)
 
 	if err := form.Run(); err != nil {
-		return nil, err
 		return nil, nil, err
 	}
 
-	// If PKCS#12 requested, optionally ask for password
+	// Normalize custom-existing-ca selection
+	if data.Role == "custom-existing-ca" {
+		data.Role = string(cert.RoleExistingCA)
+	}
+
+	// Case 1: Using an existing Root CA
+	if data.Role == string(cert.RoleExistingCA) {
+		existingCAForm := huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("Existing Root CA Certificate Path").
+					Description("Path to your existing rootCA.pem or rootCA.crt").
+					Value(&data.ExistingCACert).
+					Validate(func(s string) error {
+						if strings.TrimSpace(s) == "" {
+							return errors.New("path to Root CA certificate is required")
+						}
+						if _, err := os.Stat(strings.TrimSpace(s)); err != nil {
+							return fmt.Errorf("file not found: %s", s)
+						}
+						return nil
+					}),
+
+				huh.NewInput().
+					Title("Existing Root CA Private Key Path").
+					Description("Path to your existing rootCA-key.pem or rootCA.key").
+					Value(&data.ExistingCAKey).
+					Validate(func(s string) error {
+						if strings.TrimSpace(s) == "" {
+							return errors.New("path to Root CA private key is required")
+						}
+						if _, err := os.Stat(strings.TrimSpace(s)); err != nil {
+							return fmt.Errorf("file not found: %s", s)
+						}
+						return nil
+					}),
+
+				huh.NewInput().
+					Title("Root CA Key Passphrase (Optional)").
+					Description("Leave empty if your Root CA private key is unencrypted").
+					EchoMode(huh.EchoModePassword).
+					Value(&data.ExistingCAPass),
+			),
+		).WithTheme(theme)
+
+		if err := existingCAForm.Run(); err != nil {
+			return nil, nil, err
+		}
+	} else if data.Role == string(cert.RoleCALeaf) || data.Role == string(cert.RoleCA) {
+		// Case 2: Generating a NEW Root CA -> Ask for Root CA Name, Validity in YEARS, and Trust install
+		newCAForm := huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("Root CA Common Name").
+					Description("Name of the new Root Certification Authority").
+					Value(&data.RootCAName),
+
+				huh.NewInput().
+					Title("Root CA Validity Duration (Years)").
+					Description("How many YEARS should the Root CA remain valid? [Default: 10 years, e.g. 5, 10, 20, 30]").
+					Value(&data.RootCAValidityYears).
+					Validate(func(s string) error {
+						n, err := strconv.Atoi(strings.TrimSpace(s))
+						if err != nil || n <= 0 {
+							return errors.New("Root CA validity must be a positive number of years (e.g. 5, 10, 20)")
+						}
+						if n > 50 {
+							return errors.New("Root CA validity duration cannot exceed 50 years")
+						}
+						return nil
+					}),
+
+				huh.NewConfirm().
+					Title("Install new Root CA into OS Trust Store?").
+					Description("Enables automatic trust in Windows (10/11/Server), Linux (Ubuntu/Debian/RHEL)").
+					Value(&data.InstallOS),
+
+				huh.NewConfirm().
+					Title("Install new Root CA for Browsers?").
+					Description("Enables automatic trust in Google Chrome, Microsoft Edge, and Mozilla Firefox").
+					Value(&data.InstallBrowsers),
+			),
+		).WithTheme(theme)
+
+		if err := newCAForm.Run(); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// If PKCS#12 requested, prompt for password
 	if data.GenPKCS12 {
 		p12Form := huh.NewForm(
 			huh.NewGroup(
@@ -291,26 +371,28 @@ func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 		).WithTheme(theme)
 
 		if err := p12Form.Run(); err != nil {
-			return nil, err
 			return nil, nil, err
 		}
 	}
 
-	// Convert form data to cert.Config
-	days, _ := strconv.Atoi(strings.TrimSpace(data.ValidityDays))
-	if days <= 0 {
-		days = 365
+	leafDays, _ := strconv.Atoi(strings.TrimSpace(data.ValidityDays))
+	if leafDays <= 0 {
+		leafDays = 365
 	}
+
+	caYears, _ := strconv.Atoi(strings.TrimSpace(data.RootCAValidityYears))
+	if caYears <= 0 {
+		caYears = 10
+	}
+	caDays := caYears * 365
 
 	dnsList, ipList, err := cert.ParseSANLists(data.SANDNS, data.SANIP)
 	if err != nil {
-		return nil, err
 		return nil, nil, err
 	}
 
 	certFile := "cert.pem"
 	keyFile := "key.pem"
-	p12File := "cert.p12"
 	rootCertFile := "rootCA.pem"
 	rootKeyFile := "rootCA-key.pem"
 	chainFile := "chain.pem"
@@ -319,7 +401,6 @@ func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 	if data.NamingScheme == "crt" {
 		certFile = "cert.crt"
 		keyFile = "key.key"
-		p12File = "cert.pfx"
 		rootCertFile = "rootCA.crt"
 		rootKeyFile = "rootCA.key"
 		chainFile = "chain.crt"
@@ -331,13 +412,16 @@ func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 		KeyType:            cert.KeyType(data.KeyType),
 		CommonName:         strings.TrimSpace(data.CommonName),
 		RootCACommonName:   strings.TrimSpace(data.RootCAName),
+		ExistingCACertPath: strings.TrimSpace(data.ExistingCACert),
+		ExistingCAKeyPath:  strings.TrimSpace(data.ExistingCAKey),
+		ExistingCAPassword: data.ExistingCAPass,
 		Organization:       strings.TrimSpace(data.Organization),
 		OrganizationalUnit: strings.TrimSpace(data.Unit),
 		Country:            strings.ToUpper(strings.TrimSpace(data.Country)),
 		DNSNames:           dnsList,
 		IPAddresses:        ipList,
-		ValidityDays:       days,
-		RootCAValidityDays: 3650,
+		ValidityDays:       leafDays,
+		RootCAValidityDays: caDays,
 		OutputDir:          strings.TrimSpace(data.OutputDir),
 		CertFileName:       certFile,
 		KeyFileName:        keyFile,
@@ -350,7 +434,6 @@ func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 		KeyFormat:          "pkcs8",
 	}
 
-	return cfg, nil
 	opts := &trust.InstallOptions{
 		InstallOS:       data.InstallOS,
 		InstallBrowsers: data.InstallBrowsers,
@@ -359,8 +442,6 @@ func RunInteractiveForm() (*cert.Config, *trust.InstallOptions, error) {
 	return cfg, opts, nil
 }
 
-// DisplaySuccess prints an enterprise-grade styled summary of the generated assets.
-func DisplaySuccess(res *cert.Result) {
 // DisplaySuccess prints an enterprise-grade styled summary of generated certificates and trust status.
 func DisplaySuccess(res *cert.Result, report *trust.InstallReport) {
 	boxStyle := lipgloss.NewStyle().
@@ -370,7 +451,6 @@ func DisplaySuccess(res *cert.Result, report *trust.InstallReport) {
 		MarginTop(1).
 		MarginBottom(1)
 
-	successBadge := lipgloss.NewStyle().
 	headerBadge := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("#000000")).
@@ -389,15 +469,10 @@ func DisplaySuccess(res *cert.Result, report *trust.InstallReport) {
 	valStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FAFAFA"))
 
-	var content strings.Builder
-	content.WriteString(fmt.Sprintf("%s\n\n", successBadge.Render("CERTIFICATE & PRIVATE KEY GENERATED SUCCESSFULLY")))
 	pathStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#00D7D7")).
 		Bold(true)
 
-	content.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Common Name:"), valStyle.Render(res.Certificate.Subject.CommonName)))
-	if len(res.Certificate.Subject.Organization) > 0 {
-		content.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Organization:"), valStyle.Render(strings.Join(res.Certificate.Subject.Organization, ", "))))
 	statusGood := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#04B575")).
 		Bold(true)
@@ -405,38 +480,36 @@ func DisplaySuccess(res *cert.Result, report *trust.InstallReport) {
 	var sb strings.Builder
 
 	title := "CERTIFICATES & KEYS GENERATED SUCCESSFULLY"
-	if res.IsPKI {
-		title = "ROOT CA & SIGNED LEAF CERTIFICATE GENERATED SUCCESSFULLY"
+	if res.IsExistingCA {
+		title = "LEAF CERTIFICATE SIGNED BY EXISTING ROOT CA"
+	} else if res.IsPKI {
+		title = "NEW ROOT CA & SIGNED LEAF CERTIFICATE GENERATED"
 	}
-	roleLabel := "Leaf (Server & Client Auth)"
-	if res.Certificate.IsCA {
-		roleLabel = "Certificate Authority (CA)"
 	sb.WriteString(fmt.Sprintf("%s\n\n", headerBadge.Render(title)))
 
 	// Section 1: Root CA Details
 	if res.IsPKI {
-		sb.WriteString(fmt.Sprintf("%s\n", sectionStyle.Render("── ROOT CERTIFICATE AUTHORITY (ROOT CA) ──")))
+		headerLabel := "── ROOT CERTIFICATE AUTHORITY (ROOT CA) ──"
+		if res.IsExistingCA {
+			headerLabel = "── SIGNED USING EXISTING ROOT CA ──"
+		}
+		sb.WriteString(fmt.Sprintf("%s\n", sectionStyle.Render(headerLabel)))
 		sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Root CA Name:"), valStyle.Render(res.RootCACertificate.Subject.CommonName)))
 		sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Root CA Serial:"), valStyle.Render(res.RootCASerialHex)))
+		sb.WriteString(fmt.Sprintf("%s %s to %s\n", labelStyle.Render("Root CA Validity:"),
+			valStyle.Render(res.RootCACertificate.NotBefore.Format("2006-01-02 15:04:05 UTC")),
+			valStyle.Render(res.RootCACertificate.NotAfter.Format("2006-01-02 15:04:05 UTC")),
+		))
 		sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Root CA Fingerprint:"), valStyle.Render(res.RootCAFingerprint)))
 		sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Root CA Certificate:"), pathStyle.Render(res.RootCAPath)))
-		sb.WriteString(fmt.Sprintf("%s %s %s\n", labelStyle.Render("Root CA Private Key:"), pathStyle.Render(res.RootCAKeyPath), lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Render("(Strict 0600)")))
+		if !res.IsExistingCA {
+			sb.WriteString(fmt.Sprintf("%s %s %s\n", labelStyle.Render("Root CA Private Key:"), pathStyle.Render(res.RootCAKeyPath), lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Render("(Strict 0600)")))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Root CA Status:"), statusGood.Render("Reused existing CA (Already trusted by OS/browsers)")))
+		}
 		sb.WriteString("\n")
 	}
-	content.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Role:"), valStyle.Render(roleLabel)))
-	content.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Serial Number:"), valStyle.Render(res.SerialNumberHex)))
-	content.WriteString(fmt.Sprintf("%s %s to %s\n", labelStyle.Render("Validity Period:"),
-		valStyle.Render(res.Certificate.NotBefore.Format("2006-01-02 15:04:05 UTC")),
-		valStyle.Render(res.Certificate.NotAfter.Format("2006-01-02 15:04:05 UTC")),
-	))
 
-	if len(res.Certificate.DNSNames) > 0 {
-		content.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("SAN DNS:"), valStyle.Render(strings.Join(res.Certificate.DNSNames, ", "))))
-	}
-	if len(res.Certificate.IPAddresses) > 0 {
-		var ips []string
-		for _, ip := range res.Certificate.IPAddresses {
-			ips = append(ips, ip.String())
 	// Section 2: Leaf Certificate Details
 	if res.Certificate != nil && res.CertPath != "" {
 		sb.WriteString(fmt.Sprintf("%s\n", sectionStyle.Render("── LEAF CERTIFICATE (SERVER & CLIENT) ──")))
@@ -444,7 +517,6 @@ func DisplaySuccess(res *cert.Result, report *trust.InstallReport) {
 		if len(res.Certificate.Subject.Organization) > 0 {
 			sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Organization (O):"), valStyle.Render(strings.Join(res.Certificate.Subject.Organization, ", "))))
 		}
-		content.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("SAN IP:"), valStyle.Render(strings.Join(ips, ", "))))
 		if res.IsPKI {
 			sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Issuer / Signed By:"), statusGood.Render(res.RootCACertificate.Subject.CommonName)))
 		}
@@ -474,34 +546,32 @@ func DisplaySuccess(res *cert.Result, report *trust.InstallReport) {
 		sb.WriteString("\n")
 	}
 
-	content.WriteString(fmt.Sprintf("%s %s\n\n", labelStyle.Render("SHA-256 Fingerprint:"), valStyle.Render(res.FingerprintSHA256)))
 	// Section 3: OS & Browser Trust Status
 	if report != nil {
 		sb.WriteString(fmt.Sprintf("%s\n", sectionStyle.Render("── OS & BROWSER TRUST STATUS ──")))
 
-	pathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7D7")).Bold(true)
-	content.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Certificate PEM:"), pathStyle.Render(res.CertPath)))
-	content.WriteString(fmt.Sprintf("%s %s %s\n", labelStyle.Render("Private Key PEM:"), pathStyle.Render(res.KeyPath), lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Render("(Strict 0600 mode)")))
-	if res.PKCS12Path != "" {
-		content.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("PKCS#12 Bundle:"), pathStyle.Render(res.PKCS12Path)))
-		osIcon := "✔"
-		if !report.OSInstalled {
-			osIcon = "⚠"
-		}
-		sb.WriteString(fmt.Sprintf("%s %s %s\n", labelStyle.Render("System / OS Store:"), osIcon, valStyle.Render(report.OSMessage)))
-
-		if report.ChromeStatus != "" {
-			sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Google Chrome:"), statusGood.Render(report.ChromeStatus)))
-		}
-		if report.EdgeStatus != "" {
-			sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Microsoft Edge:"), statusGood.Render(report.EdgeStatus)))
-		}
-		if report.FirefoxMessage != "" {
-			ffIcon := "✔"
-			if !report.FirefoxInstalled {
-				ffIcon = "ℹ"
+		if res.IsExistingCA {
+			sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Root CA Trust:"), statusGood.Render("Signed by existing trusted Root CA. All browsers already trust this certificate.")))
+		} else {
+			osIcon := "✔"
+			if !report.OSInstalled {
+				osIcon = "⚠"
 			}
-			sb.WriteString(fmt.Sprintf("%s %s %s\n", labelStyle.Render("Mozilla Firefox:"), ffIcon, valStyle.Render(report.FirefoxMessage)))
+			sb.WriteString(fmt.Sprintf("%s %s %s\n", labelStyle.Render("System / OS Store:"), osIcon, valStyle.Render(report.OSMessage)))
+
+			if report.ChromeStatus != "" {
+				sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Google Chrome:"), statusGood.Render(report.ChromeStatus)))
+			}
+			if report.EdgeStatus != "" {
+				sb.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Microsoft Edge:"), statusGood.Render(report.EdgeStatus)))
+			}
+			if report.FirefoxMessage != "" {
+				ffIcon := "✔"
+				if !report.FirefoxInstalled {
+					ffIcon = "ℹ"
+				}
+				sb.WriteString(fmt.Sprintf("%s %s %s\n", labelStyle.Render("Mozilla Firefox:"), ffIcon, valStyle.Render(report.FirefoxMessage)))
+			}
 		}
 
 		if len(report.ManualCommands) > 0 {
@@ -515,7 +585,6 @@ func DisplaySuccess(res *cert.Result, report *trust.InstallReport) {
 		}
 	}
 
-	fmt.Println(boxStyle.Render(content.String()))
 	fmt.Println(boxStyle.Render(sb.String()))
 }
 
@@ -536,4 +605,3 @@ func DisplayError(err error) {
 
 	fmt.Fprintln(os.Stderr, errStyle.Render(fmt.Sprintf("%s %v", badge, err)))
 }
-
