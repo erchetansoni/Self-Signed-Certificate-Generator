@@ -93,21 +93,29 @@ func TestParseSANLists(t *testing.T) {
 }
 
 func TestGenerateLeafECDSAP256(t *testing.T) {
+func TestGeneratePKIHierarchy(t *testing.T) {
 	tempDir := t.TempDir()
 
 	cfg := Config{
 		Role:               RoleLeaf,
+		Role:               RoleCALeaf,
 		KeyType:            KeyTypeECDSAP256,
 		CommonName:         "app.internal",
+		RootCACommonName:   "Internal Enterprise Root CA",
 		Organization:       "ACME Corp",
 		OrganizationalUnit: "Engineering",
 		Country:            "US",
 		DNSNames:           []string{"localhost", "service.internal"},
 		IPAddresses:        []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("10.0.0.5")},
 		ValidityDays:       30,
+		ValidityDays:       365,
+		RootCAValidityDays: 3650,
 		OutputDir:          tempDir,
 		CertFileName:       "cert.pem",
 		KeyFileName:        "key.pem",
+		RootCAFileName:     "rootCA.pem",
+		RootKeyFileName:    "rootCA-key.pem",
+		ChainFileName:      "chain.pem",
 		GeneratePKCS12:     true,
 		PKCS12FileName:     "bundle.p12",
 		PKCS12Password:     "secret123",
@@ -116,42 +124,70 @@ func TestGenerateLeafECDSAP256(t *testing.T) {
 	res, err := Generate(cfg)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
+		t.Fatalf("Generate PKI hierarchy failed: %v", err)
 	}
 
 	// 1. Verify Certificate DER parsing
 	parsedCert, err := x509.ParseCertificate(res.CertificateDER)
 	if err != nil {
 		t.Fatalf("failed to parse certificate DER: %v", err)
+	if !res.IsPKI {
+		t.Fatalf("Expected res.IsPKI to be true")
 	}
 
 	// Subject verification
 	if parsedCert.Subject.CommonName != "app.internal" {
 		t.Errorf("CN mismatch: got %q, want 'app.internal'", parsedCert.Subject.CommonName)
+	// 1. Verify Root CA
+	caCert, err := x509.ParseCertificate(res.RootCADER)
+	if err != nil {
+		t.Fatalf("Failed to parse Root CA DER: %v", err)
 	}
 	if len(parsedCert.Subject.Organization) == 0 || parsedCert.Subject.Organization[0] != "ACME Corp" {
 		t.Errorf("Organization mismatch: %v", parsedCert.Subject.Organization)
+	if !caCert.IsCA {
+		t.Errorf("Root CA certificate must have IsCA = true")
 	}
 	if len(parsedCert.Subject.OrganizationalUnit) == 0 || parsedCert.Subject.OrganizationalUnit[0] != "Engineering" {
 		t.Errorf("OU mismatch: %v", parsedCert.Subject.OrganizationalUnit)
+	if caCert.Subject.CommonName != "Internal Enterprise Root CA" {
+		t.Errorf("Root CA CN mismatch: got %q", caCert.Subject.CommonName)
 	}
 	if len(parsedCert.Subject.Country) == 0 || parsedCert.Subject.Country[0] != "US" {
 		t.Errorf("Country mismatch: %v", parsedCert.Subject.Country)
+	if caCert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		t.Errorf("Root CA must have KeyUsageCertSign")
 	}
 
 	// Basic Constraints
 	if parsedCert.IsCA {
+	// 2. Verify Leaf Certificate
+	leafCert, err := x509.ParseCertificate(res.CertificateDER)
+	if err != nil {
+		t.Fatalf("Failed to parse Leaf certificate DER: %v", err)
+	}
+	if leafCert.IsCA {
 		t.Errorf("Leaf certificate must not be a CA")
 	}
 	if !parsedCert.BasicConstraintsValid {
 		t.Errorf("BasicConstraintsValid must be true")
+	if leafCert.Subject.CommonName != "app.internal" {
+		t.Errorf("Leaf CN mismatch: got %q", leafCert.Subject.CommonName)
 	}
 
 	// Key Usages
 	if parsedCert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
 		t.Errorf("DigitalSignature KeyUsage must be set")
+	// 3. Verify Leaf signature is signed by the Root CA!
+	if err := leafCert.CheckSignatureFrom(caCert); err != nil {
+		t.Fatalf("Cryptographic verification failed: Leaf cert was not signed by Root CA: %v", err)
 	}
 	if parsedCert.KeyUsage&x509.KeyUsageCertSign != 0 {
 		t.Errorf("CertSign KeyUsage must NOT be set for leaf")
+
+	// 4. Verify Root CA self-signature
+	if err := caCert.CheckSignatureFrom(caCert); err != nil {
+		t.Fatalf("Root CA self-signature verification failed: %v", err)
 	}
 
 	// ExtKeyUsages
@@ -160,6 +196,30 @@ func TestGenerateLeafECDSAP256(t *testing.T) {
 	for _, eku := range parsedCert.ExtKeyUsage {
 		if eku == x509.ExtKeyUsageServerAuth {
 			hasServerAuth = true
+	// 5. Verify all files exist in output folder
+	expectedFiles := []string{
+		"rootCA.pem",
+		"rootCA-key.pem",
+		"cert.pem",
+		"key.pem",
+		"chain.pem",
+		"bundle.p12",
+	}
+	for _, f := range expectedFiles {
+		p := res.RootCAPath
+		switch f {
+		case "rootCA.pem":
+			p = res.RootCAPath
+		case "rootCA-key.pem":
+			p = res.RootCAKeyPath
+		case "cert.pem":
+			p = res.CertPath
+		case "key.pem":
+			p = res.KeyPath
+		case "chain.pem":
+			p = res.ChainPath
+		case "bundle.p12":
+			p = res.PKCS12Path
 		}
 		if eku == x509.ExtKeyUsageClientAuth {
 			hasClientAuth = true
@@ -177,6 +237,12 @@ func TestGenerateLeafECDSAP256(t *testing.T) {
 			if act == exp {
 				found = true
 				break
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Errorf("Expected file %s not found at %s: %v", f, p, err)
+		} else if (f == "key.pem" || f == "rootCA-key.pem" || f == "bundle.p12") && runtime.GOOS != "windows" {
+			if info.Mode().Perm() != 0600 {
+				t.Errorf("File %s permissions should be 0600, got %o", f, info.Mode().Perm())
 			}
 		}
 		if !found {
@@ -187,18 +253,28 @@ func TestGenerateLeafECDSAP256(t *testing.T) {
 	// Serial Number (128-bit)
 	if parsedCert.SerialNumber == nil || parsedCert.SerialNumber.Sign() <= 0 {
 		t.Fatalf("Serial number must be a positive integer")
+	// 6. Verify PKCS#12 bundle contains both Leaf and CA cert
+	p12PrivKey, p12Cert, caList, err := pkcs12.DecodeChain(res.PKCS12Bundle, "secret123")
+	if err != nil {
+		t.Fatalf("pkcs12.DecodeChain failed: %v", err)
 	}
 	max128Bit := new(big.Int).Lsh(big.NewInt(1), 128)
 	if parsedCert.SerialNumber.Cmp(max128Bit) >= 0 {
 		t.Errorf("Serial number %s exceeds 128 bits", parsedCert.SerialNumber.String())
+	if p12Cert.Subject.CommonName != "app.internal" {
+		t.Errorf("P12 cert CommonName mismatch: %s", p12Cert.Subject.CommonName)
 	}
 
 	// SKID and AKID
 	if len(parsedCert.SubjectKeyId) == 0 {
 		t.Errorf("SubjectKeyId must not be empty")
+	if len(caList) == 0 || caList[0].Subject.CommonName != "Internal Enterprise Root CA" {
+		t.Errorf("P12 CA chain missing Root CA: %v", caList)
 	}
 	if !bytes.Equal(parsedCert.SubjectKeyId, parsedCert.AuthorityKeyId) {
 		t.Errorf("For self-signed cert, AKID must match SKID")
+	if _, ok := p12PrivKey.(*ecdsa.PrivateKey); !ok {
+		t.Errorf("P12 private key is not ECDSA")
 	}
 
 	// Validity dates
@@ -237,12 +313,14 @@ func TestGenerateLeafECDSAP256(t *testing.T) {
 	}
 
 	// TLS KeyPair test
+	// 7. Verify TLS key pair loads
 	tlsCert, err := tls.X509KeyPair(res.CertificatePEM, res.PrivateKeyPEM)
 	if err != nil {
 		t.Fatalf("tls.X509KeyPair failed: %v", err)
 	}
 	if len(tlsCert.Certificate) == 0 {
 		t.Errorf("tls.Certificate slice is empty")
+		t.Errorf("tls.Certificate is empty")
 	}
 
 	// PKCS#12 decoding test
@@ -273,19 +351,23 @@ func TestGenerateLeafECDSAP256(t *testing.T) {
 }
 
 func TestGenerateCAWithRSA4096(t *testing.T) {
+func TestGenerateStandaloneCA(t *testing.T) {
 	tempDir := t.TempDir()
 
 	cfg := Config{
 		Role:         RoleCA,
 		KeyType:      KeyTypeRSA4096,
 		CommonName:   "Internal Root CA",
+		CommonName:   "Standalone Root CA",
 		Organization: "Internal Infrastructure",
 		Country:      "IN",
 		ValidityDays: 1825, // 5 years
+		ValidityDays: 1825,
 		OutputDir:    tempDir,
 		CertFileName: "ca.crt",
 		KeyFileName:  "ca.key",
 		KeyFormat:    "traditional", // Test traditional RSA PRIVATE KEY format
+		KeyFormat:    "traditional",
 	}
 
 	res, err := Generate(cfg)
@@ -313,12 +395,15 @@ func TestGenerateCAWithRSA4096(t *testing.T) {
 	expectedUsage := x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
 	if parsedCert.KeyUsage&expectedUsage != expectedUsage {
 		t.Errorf("KeyUsage missing required flags: got %v, expected %v", parsedCert.KeyUsage, expectedUsage)
+		t.Errorf("KeyUsage missing flags: %v", parsedCert.KeyUsage)
 	}
 
 	// RSA Key verification
 	rsaKey, ok := res.PrivateKey.(*rsa.PrivateKey)
 	if !ok {
 		t.Fatalf("Private key is not *rsa.PrivateKey")
+	if !ok || rsaKey.N.BitLen() != 4096 {
+		t.Fatalf("Expected 4096-bit RSA key")
 	}
 	if rsaKey.N.BitLen() != 4096 {
 		t.Errorf("Expected 4096-bit RSA key, got %d", rsaKey.N.BitLen())
@@ -347,10 +432,12 @@ func TestGenerateCAWithRSA4096(t *testing.T) {
 }
 
 func TestGenerateECDSA384AndRSA2048(t *testing.T) {
+func TestGenerateStandaloneLeaf(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// 1. Test ECDSA P-384
 	cfgP384 := Config{
+	cfg := Config{
 		Role:         RoleLeaf,
 		KeyType:      KeyTypeECDSAP384,
 		CommonName:   "p384.internal",
@@ -359,15 +446,18 @@ func TestGenerateECDSA384AndRSA2048(t *testing.T) {
 		KeyFileName:  "p384.key",
 	}
 	resP384, err := Generate(cfgP384)
+	res, err := Generate(cfg)
 	if err != nil {
 		t.Fatalf("Generate P-384 failed: %v", err)
 	}
 	certP384, err := x509.ParseCertificate(resP384.CertificateDER)
+	certP384, err := x509.ParseCertificate(res.CertificateDER)
 	if err != nil {
 		t.Fatalf("Parse P-384 failed: %v", err)
 	}
 	if err := certP384.CheckSignature(certP384.SignatureAlgorithm, certP384.RawTBSCertificate, certP384.Signature); err != nil {
 		t.Errorf("P-384 cryptographic signature verification failed: %v", err)
+		t.Errorf("P-384 signature verification failed: %v", err)
 	}
 	ecKey := resP384.PrivateKey.(*ecdsa.PrivateKey)
 	if ecKey.Curve.Params().Name != "P-384" {
@@ -416,6 +506,7 @@ func TestValidationErrors(t *testing.T) {
 	cfg = Config{
 		CommonName: "test.local",
 		Country:    "USA", // 3 letters
+		Country:    "USA",
 		OutputDir:  tempDir,
 	}
 	if _, err := Generate(cfg); err == nil {

@@ -1,6 +1,7 @@
 package cert
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -25,11 +26,15 @@ import (
 )
 
 // CertRole specifies the intended role of the certificate.
+// CertRole specifies the architecture / role of the generated certificates.
 type CertRole string
 
 const (
 	RoleCA   CertRole = "ca"
 	RoleLeaf CertRole = "leaf"
+	RoleCALeaf CertRole = "ca-leaf" // Complete PKI: Generates Root CA & signed Leaf cert (Default)
+	RoleCA     CertRole = "ca"      // Root / Intermediate CA only
+	RoleLeaf   CertRole = "leaf"    // Standalone self-signed leaf without CA
 )
 
 // KeyType specifies the cryptographic algorithm and key size.
@@ -43,6 +48,7 @@ const (
 )
 
 // Config holds all parameters required to generate the certificate and private key.
+// Config holds all parameters required to generate certificates and keys.
 type Config struct {
 	Role               CertRole
 	KeyType            KeyType
@@ -60,10 +66,27 @@ type Config struct {
 	PKCS12FileName     string
 	PKCS12Password     string
 	KeyFormat          string // "pkcs8" (default) or "traditional"
+
+	// Root CA specific settings (used when Role == RoleCALeaf or RoleCA)
+	RootCACommonName   string
+	RootCAValidityDays int
+
+	// Output file options
+	OutputDir      string
+	CertFileName   string
+	KeyFileName    string
+	RootCAFileName string
+	RootKeyFileName string
+	ChainFileName  string
+	GeneratePKCS12 bool
+	PKCS12FileName string
+	PKCS12Password string
+	KeyFormat      string // "pkcs8" (default) or "traditional"
 }
 
 // Result contains the generated cryptographic artifacts and metadata.
 type Result struct {
+	// Leaf / Primary Certificate
 	CertificateDER    []byte
 	CertificatePEM    []byte
 	PrivateKeyPEM     []byte
@@ -75,6 +98,23 @@ type Result struct {
 	PKCS12Path        string
 	FingerprintSHA256 string
 	SerialNumberHex   string
+
+	// Root CA (when Role == RoleCALeaf or RoleCA)
+	IsPKI             bool
+	RootCADER         []byte
+	RootCAPEM         []byte
+	RootCAKeyPEM      []byte
+	RootCACertificate *x509.Certificate
+	RootCAPath        string
+	RootCAKeyPath     string
+	RootCAFingerprint string
+	RootCASerialHex   string
+
+	// Certificate Chain & Bundles
+	ChainPEM     []byte
+	ChainPath    string
+	PKCS12Bundle []byte
+	PKCS12Path   string
 }
 
 // ParseSANLists takes comma-separated strings for DNS names and IP addresses
@@ -116,6 +156,7 @@ func ParseSANLists(dnsInput, ipInput string) ([]string, []net.IP, error) {
 }
 
 // Validate verifies the configuration fields and applies sensible defaults.
+// Validate verifies configuration fields and applies sensible defaults.
 func (c *Config) Validate() error {
 	c.CommonName = strings.TrimSpace(c.CommonName)
 	if c.CommonName == "" {
@@ -124,9 +165,15 @@ func (c *Config) Validate() error {
 
 	if c.Role == "" {
 		c.Role = RoleLeaf
+		c.Role = RoleCALeaf
 	}
 	if c.Role != RoleCA && c.Role != RoleLeaf {
 		return fmt.Errorf("invalid certificate role %q (must be %q or %q)", c.Role, RoleCA, RoleLeaf)
+	switch c.Role {
+	case RoleCALeaf, RoleCA, RoleLeaf:
+		// Valid
+	default:
+		return fmt.Errorf("invalid certificate role %q (must be %q, %q, or %q)", c.Role, RoleCALeaf, RoleCA, RoleLeaf)
 	}
 
 	if c.KeyType == "" {
@@ -144,6 +191,18 @@ func (c *Config) Validate() error {
 	}
 	if c.ValidityDays > 3650 {
 		return errors.New("validity duration exceeds maximum allowed of 3650 days (10 years)")
+	}
+
+	if c.RootCAValidityDays <= 0 {
+		c.RootCAValidityDays = 3650 // 10 years for Root CA
+	}
+
+	if c.RootCACommonName == "" {
+		if c.Role == RoleCA {
+			c.RootCACommonName = c.CommonName
+		} else {
+			c.RootCACommonName = fmt.Sprintf("%s Root CA", c.CommonName)
+		}
 	}
 
 	c.Country = strings.ToUpper(strings.TrimSpace(c.Country))
@@ -164,8 +223,18 @@ func (c *Config) Validate() error {
 	if c.KeyFileName == "" {
 		c.KeyFileName = "key.pem"
 	}
+	if c.RootCAFileName == "" {
+		c.RootCAFileName = "rootCA.pem"
+	}
+	if c.RootKeyFileName == "" {
+		c.RootKeyFileName = "rootCA-key.pem"
+	}
+	if c.ChainFileName == "" {
+		c.ChainFileName = "chain.pem"
+	}
 	if c.GeneratePKCS12 && c.PKCS12FileName == "" {
 		c.PKCS12FileName = "cert.p12"
+		c.PKCS12FileName = "bundle.p12"
 	}
 
 	if c.KeyFormat == "" {
@@ -174,6 +243,7 @@ func (c *Config) Validate() error {
 
 	// For Leaf certificates, ensure the CN is included in SANs if not already present
 	if c.Role == RoleLeaf {
+	if c.Role == RoleLeaf || c.Role == RoleCALeaf {
 		if ip := net.ParseIP(c.CommonName); ip != nil {
 			found := false
 			for _, existingIP := range c.IPAddresses {
@@ -203,6 +273,7 @@ func (c *Config) Validate() error {
 }
 
 // Generate creates the self-signed X.509 certificate and private key.
+// Generate creates the certificate(s) and private key(s) based on configuration.
 func Generate(cfg Config) (*Result, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validation error: %w", err)
@@ -210,21 +281,302 @@ func Generate(cfg Config) (*Result, error) {
 
 	// 1. Generate Private Key
 	privKey, pubKey, isRSA, err := generateKeyPair(cfg.KeyType)
+	switch cfg.Role {
+	case RoleCALeaf:
+		return generatePKIHierarchy(cfg)
+	case RoleCA:
+		return generateStandaloneCA(cfg)
+	default:
+		return generateStandaloneLeaf(cfg)
+	}
+}
+
+// generatePKIHierarchy generates a dedicated Root CA and issues a Leaf Certificate signed by it.
+func generatePKIHierarchy(cfg Config) (*Result, error) {
+	// 1. Generate Root CA Key Pair
+	caPrivKey, caPubKey, isRSA, err := generateKeyPair(cfg.KeyType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key pair: %w", err)
+		return nil, fmt.Errorf("failed to generate CA key pair: %w", err)
 	}
 
 	// 2. Generate 128-bit Cryptographically Secure Random Serial Number
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	// 2. Generate 128-bit Serial Number for Root CA
+	caSerial, err := generateSerialNumber()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate random serial number: %w", err)
+		return nil, err
 	}
 
 	// 3. Compute Subject Key Identifier (RFC 5280 4.2.1.2)
+	// 3. Compute Root CA SKID
+	caPubDER, err := x509.MarshalPKIXPublicKey(caPubKey)
+	if err != nil {
+		return nil, err
+	}
+	caSKID := computeSKID(caPubDER)
+
+	// 4. Build Root CA Template
+	caSubject := pkix.Name{
+		CommonName: cfg.RootCACommonName,
+	}
+	if cfg.Organization != "" {
+		caSubject.Organization = []string{cfg.Organization}
+	}
+	if cfg.Country != "" {
+		caSubject.Country = []string{cfg.Country}
+	}
+
+	caNotBefore := time.Now().UTC().Add(-5 * time.Minute)
+	caNotAfter := caNotBefore.Add(time.Duration(cfg.RootCAValidityDays) * 24 * time.Hour)
+
+	caTemplate := x509.Certificate{
+		SerialNumber:          caSerial,
+		Subject:               caSubject,
+		NotBefore:             caNotBefore,
+		NotAfter:              caNotAfter,
+		SubjectKeyId:          caSKID,
+		AuthorityKeyId:        caSKID,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		MaxPathLen:            1,
+		MaxPathLenZero:        false,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+	}
+	if isRSA {
+		caTemplate.KeyUsage |= x509.KeyUsageKeyEncipherment
+	}
+
+	// 5. Self-Sign Root CA
+	caCertDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, caPubKey, caPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to self-sign Root CA: %w", err)
+	}
+	parsedCACert, err := x509.ParseCertificate(caCertDER)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Root CA: %w", err)
+	}
+
+	caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCertDER})
+	caKeyPEM, err := encodePrivateKey(caPrivKey, cfg.KeyFormat)
+	if err != nil {
+		return nil, err
+	}
+
+	// 6. Generate Leaf Key Pair
+	leafPrivKey, leafPubKey, leafIsRSA, err := generateKeyPair(cfg.KeyType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Leaf key pair: %w", err)
+	}
+
+	leafSerial, err := generateSerialNumber()
+	if err != nil {
+		return nil, err
+	}
+
+	leafPubDER, err := x509.MarshalPKIXPublicKey(leafPubKey)
+	if err != nil {
+		return nil, err
+	}
+	leafSKID := computeSKID(leafPubDER)
+
+	// 7. Build Leaf Template
+	leafSubject := pkix.Name{
+		CommonName: cfg.CommonName,
+	}
+	if cfg.Organization != "" {
+		leafSubject.Organization = []string{cfg.Organization}
+	}
+	if cfg.OrganizationalUnit != "" {
+		leafSubject.OrganizationalUnit = []string{cfg.OrganizationalUnit}
+	}
+	if cfg.Country != "" {
+		leafSubject.Country = []string{cfg.Country}
+	}
+
+	leafNotBefore := time.Now().UTC().Add(-5 * time.Minute)
+	leafNotAfter := leafNotBefore.Add(time.Duration(cfg.ValidityDays) * 24 * time.Hour)
+
+	leafTemplate := x509.Certificate{
+		SerialNumber:          leafSerial,
+		Subject:               leafSubject,
+		NotBefore:             leafNotBefore,
+		NotAfter:              leafNotAfter,
+		SubjectKeyId:          leafSKID,
+		AuthorityKeyId:        caSKID, // Signed by CA!
+		IsCA:                  false,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+			x509.ExtKeyUsageClientAuth,
+		},
+		DNSNames:    cfg.DNSNames,
+		IPAddresses: cfg.IPAddresses,
+	}
+	if leafIsRSA {
+		leafTemplate.KeyUsage |= x509.KeyUsageKeyEncipherment
+	}
+
+	// 8. Sign Leaf Certificate with Root CA
+	leafCertDER, err := x509.CreateCertificate(rand.Reader, &leafTemplate, parsedCACert, leafPubKey, caPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign Leaf certificate with Root CA: %w", err)
+	}
+	parsedLeafCert, err := x509.ParseCertificate(leafCertDER)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse signed Leaf certificate: %w", err)
+	}
+
+	leafCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafCertDER})
+	leafKeyPEM, err := encodePrivateKey(leafPrivKey, cfg.KeyFormat)
+	if err != nil {
+		return nil, err
+	}
+
+	// 9. Concatenate Full Chain (Leaf + CA)
+	chainPEM := bytes.Join([][]byte{leafCertPEM, caCertPEM}, []byte(""))
+
+	// 10. Generate Optional PKCS#12 Bundle containing Leaf + CA
+	var pfxData []byte
+	if cfg.GeneratePKCS12 {
+		pfxData, err = pkcs12.Encode(rand.Reader, leafPrivKey, parsedLeafCert, []*x509.Certificate{parsedCACert}, cfg.PKCS12Password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate PKCS#12 bundle: %w", err)
+		}
+	}
+
+	result := &Result{
+		CertificateDER:    leafCertDER,
+		CertificatePEM:    leafCertPEM,
+		PrivateKeyPEM:     leafKeyPEM,
+		Certificate:       parsedLeafCert,
+		PrivateKey:        leafPrivKey,
+		FingerprintSHA256: formatFingerprint(leafCertDER),
+		SerialNumberHex:   fmt.Sprintf("%032X", leafSerial),
+
+		IsPKI:             true,
+		RootCADER:         caCertDER,
+		RootCAPEM:         caCertPEM,
+		RootCAKeyPEM:      caKeyPEM,
+		RootCACertificate: parsedCACert,
+		RootCAFingerprint: formatFingerprint(caCertDER),
+		RootCASerialHex:   fmt.Sprintf("%032X", caSerial),
+
+		ChainPEM:     chainPEM,
+		PKCS12Bundle: pfxData,
+	}
+
+	if err := result.SaveFiles(cfg); err != nil {
+		return nil, fmt.Errorf("failed to save output files: %w", err)
+	}
+
+	return result, nil
+}
+
+// generateStandaloneCA generates only a Root CA.
+func generateStandaloneCA(cfg Config) (*Result, error) {
+	caPrivKey, caPubKey, isRSA, err := generateKeyPair(cfg.KeyType)
+	if err != nil {
+		return nil, err
+	}
+	caSerial, err := generateSerialNumber()
+	if err != nil {
+		return nil, err
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(caPubKey)
+	if err != nil {
+		return nil, err
+	}
+	skid := computeSKID(pubDER)
+
+	subject := pkix.Name{
+		CommonName: cfg.CommonName,
+	}
+	if cfg.Organization != "" {
+		subject.Organization = []string{cfg.Organization}
+	}
+	if cfg.Country != "" {
+		subject.Country = []string{cfg.Country}
+	}
+
+	notBefore := time.Now().UTC().Add(-5 * time.Minute)
+	notAfter := notBefore.Add(time.Duration(cfg.ValidityDays) * 24 * time.Hour)
+
+	template := x509.Certificate{
+		SerialNumber:          caSerial,
+		Subject:               subject,
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		SubjectKeyId:          skid,
+		AuthorityKeyId:        skid,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		MaxPathLen:            1,
+		MaxPathLenZero:        false,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		DNSNames:              cfg.DNSNames,
+		IPAddresses:           cfg.IPAddresses,
+	}
+	if isRSA {
+		template.KeyUsage |= x509.KeyUsageKeyEncipherment
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, caPubKey, caPrivKey)
+	if err != nil {
+		return nil, err
+	}
+	parsedCert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return nil, err
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM, err := encodePrivateKey(caPrivKey, cfg.KeyFormat)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &Result{
+		CertificateDER:    certDER,
+		CertificatePEM:    certPEM,
+		PrivateKeyPEM:     keyPEM,
+		Certificate:       parsedCert,
+		PrivateKey:        caPrivKey,
+		FingerprintSHA256: formatFingerprint(certDER),
+		SerialNumberHex:   fmt.Sprintf("%032X", caSerial),
+
+		IsPKI:             true,
+		RootCADER:         certDER,
+		RootCAPEM:         certPEM,
+		RootCAKeyPEM:      keyPEM,
+		RootCACertificate: parsedCert,
+		RootCAFingerprint: formatFingerprint(certDER),
+		RootCASerialHex:   fmt.Sprintf("%032X", caSerial),
+	}
+
+	if err := result.SaveFiles(cfg); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// generateStandaloneLeaf generates a single self-signed leaf certificate without a CA.
+func generateStandaloneLeaf(cfg Config) (*Result, error) {
+	privKey, pubKey, isRSA, err := generateKeyPair(cfg.KeyType)
+	if err != nil {
+		return nil, err
+	}
+	serialNumber, err := generateSerialNumber()
+	if err != nil {
+		return nil, err
+	}
 	pubDER, err := x509.MarshalPKIXPublicKey(pubKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal public key: %w", err)
+		return nil, err
 	}
 	skid := computeSKID(pubDER)
 
@@ -254,6 +606,8 @@ func Generate(cfg Config) (*Result, error) {
 		NotAfter:              notAfter,
 		SubjectKeyId:          skid,
 		AuthorityKeyId:        skid, // Self-signed
+		AuthorityKeyId:        skid,
+		IsCA:                  false,
 		BasicConstraintsValid: true,
 	}
 
@@ -276,22 +630,32 @@ func Generate(cfg Config) (*Result, error) {
 			template.KeyUsage |= x509.KeyUsageKeyEncipherment
 		}
 		template.ExtKeyUsage = []x509.ExtKeyUsage{
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{
 			x509.ExtKeyUsageServerAuth,
 			x509.ExtKeyUsageClientAuth,
 		}
 		template.DNSNames = cfg.DNSNames
 		template.IPAddresses = cfg.IPAddresses
+		},
+		DNSNames:    cfg.DNSNames,
+		IPAddresses: cfg.IPAddresses,
+	}
+	if isRSA {
+		template.KeyUsage |= x509.KeyUsageKeyEncipherment
 	}
 
 	// 7. Create Self-Signed Certificate
 	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, pubKey, privKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create certificate: %w", err)
+		return nil, err
 	}
 
 	parsedCert, err := x509.ParseCertificate(certDER)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse generated certificate: %w", err)
+		return nil, err
 	}
 
 	// 8. Encode Certificate to PEM
@@ -301,9 +665,11 @@ func Generate(cfg Config) (*Result, error) {
 	})
 
 	// 9. Encode Private Key to PEM
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyPEM, err := encodePrivateKey(privKey, cfg.KeyFormat)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode private key: %w", err)
+		return nil, err
 	}
 
 	// 10. Generate Optional PKCS#12 Bundle
@@ -312,6 +678,7 @@ func Generate(cfg Config) (*Result, error) {
 		pfxData, err = pkcs12.Encode(rand.Reader, privKey, parsedCert, nil, cfg.PKCS12Password)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate PKCS#12 bundle: %w", err)
+			return nil, err
 		}
 	}
 
@@ -331,18 +698,22 @@ func Generate(cfg Config) (*Result, error) {
 		Certificate:       parsedCert,
 		PrivateKey:        privKey,
 		FingerprintSHA256: fingerprint,
+		FingerprintSHA256: formatFingerprint(certDER),
 		SerialNumberHex:   fmt.Sprintf("%032X", serialNumber),
+		PKCS12Bundle:      pfxData,
 	}
 
 	// 12. Write Output Files
 	if err := result.SaveFiles(cfg); err != nil {
 		return nil, fmt.Errorf("failed to save output files: %w", err)
+		return nil, err
 	}
 
 	return result, nil
 }
 
 // SaveFiles writes the PEM and PKCS#12 files to disk with strict POSIX permissions.
+// SaveFiles writes all generated artifacts to the output directory with strict permissions.
 func (r *Result) SaveFiles(cfg Config) error {
 	outDir := filepath.Clean(cfg.OutputDir)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
@@ -350,6 +721,29 @@ func (r *Result) SaveFiles(cfg Config) error {
 	}
 
 	// Write Certificate PEM (0644 readable by all)
+	// 1. If Root CA was generated (RoleCALeaf or RoleCA), save Root CA files
+	if r.IsPKI && len(r.RootCAPEM) > 0 {
+		rootCertPath := filepath.Join(outDir, cfg.RootCAFileName)
+		if err := os.WriteFile(rootCertPath, r.RootCAPEM, 0644); err != nil {
+			return fmt.Errorf("unable to write Root CA certificate to %q: %w", rootCertPath, err)
+		}
+		r.RootCAPath = rootCertPath
+
+		rootKeyPath := filepath.Join(outDir, cfg.RootKeyFileName)
+		if err := writePrivateKeyFile(rootKeyPath, r.RootCAKeyPEM); err != nil {
+			return err
+		}
+		r.RootCAKeyPath = rootKeyPath
+	}
+
+	// If Role was CA only, we're done with files
+	if cfg.Role == RoleCA {
+		r.CertPath = r.RootCAPath
+		r.KeyPath = r.RootCAKeyPath
+		return nil
+	}
+
+	// 2. Write Leaf Certificate PEM
 	certPath := filepath.Join(outDir, cfg.CertFileName)
 	if err := os.WriteFile(certPath, r.CertificatePEM, 0644); err != nil {
 		return fmt.Errorf("unable to write certificate to %q: %w", certPath, err)
@@ -357,10 +751,13 @@ func (r *Result) SaveFiles(cfg Config) error {
 	r.CertPath = certPath
 
 	// Write Private Key PEM with strict 0600 permissions
+	// 3. Write Leaf Private Key PEM (strict 0600)
 	keyPath := filepath.Join(outDir, cfg.KeyFileName)
 	keyFile, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("unable to create private key file %q: %w", keyPath, err)
+	if err := writePrivateKeyFile(keyPath, r.PrivateKeyPEM); err != nil {
+		return err
 	}
 	if _, err := keyFile.Write(r.PrivateKeyPEM); err != nil {
 		keyFile.Close()
@@ -374,11 +771,23 @@ func (r *Result) SaveFiles(cfg Config) error {
 	r.KeyPath = keyPath
 
 	// Write PKCS#12 bundle if generated with strict 0600 permissions
+	// 4. Write Full Chain PEM (if in PKI mode)
+	if r.IsPKI && len(r.ChainPEM) > 0 {
+		chainPath := filepath.Join(outDir, cfg.ChainFileName)
+		if err := os.WriteFile(chainPath, r.ChainPEM, 0644); err != nil {
+			return fmt.Errorf("unable to write certificate chain to %q: %w", chainPath, err)
+		}
+		r.ChainPath = chainPath
+	}
+
+	// 5. Write PKCS#12 bundle if generated
 	if cfg.GeneratePKCS12 && len(r.PKCS12Bundle) > 0 {
 		p12Path := filepath.Join(outDir, cfg.PKCS12FileName)
 		p12File, err := os.OpenFile(p12Path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 		if err != nil {
 			return fmt.Errorf("unable to create PKCS#12 file %q: %w", p12Path, err)
+		if err := writePrivateKeyFile(p12Path, r.PKCS12Bundle); err != nil {
+			return err
 		}
 		if _, err := p12File.Write(r.PKCS12Bundle); err != nil {
 			p12File.Close()
@@ -395,6 +804,27 @@ func (r *Result) SaveFiles(cfg Config) error {
 }
 
 // generateKeyPair creates the private/public key pair based on the chosen key algorithm.
+func writePrivateKeyFile(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("unable to create private file %q: %w", path, err)
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return fmt.Errorf("unable to write private file data: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("unable to close private file: %w", err)
+	}
+	_ = os.Chmod(path, 0600)
+	return nil
+}
+
+func generateSerialNumber() (*big.Int, error) {
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	return rand.Int(rand.Reader, serialNumberLimit)
+}
+
 func generateKeyPair(kt KeyType) (any, any, bool, error) {
 	switch kt {
 	case KeyTypeECDSAP256:
@@ -487,6 +917,11 @@ func (r *Result) FormatSummary() string {
 	sb.WriteString(fmt.Sprintf("  Common Name (CN): %s\n", c.Subject.CommonName))
 	if len(c.Subject.Organization) > 0 {
 		sb.WriteString(fmt.Sprintf("  Organization (O): %s\n", strings.Join(c.Subject.Organization, ", ")))
+func formatFingerprint(der []byte) string {
+	fpRaw := sha256.Sum256(der)
+	var fpParts []string
+	for _, b := range fpRaw {
+		fpParts = append(fpParts, fmt.Sprintf("%02X", b))
 	}
 	if len(c.Subject.OrganizationalUnit) > 0 {
 		sb.WriteString(fmt.Sprintf("  Organizational Unit (OU): %s\n", strings.Join(c.Subject.OrganizationalUnit, ", ")))
@@ -522,6 +957,7 @@ func (r *Result) FormatSummary() string {
 	}
 
 	return sb.String()
+	return strings.Join(fpParts, ":")
 }
 
 // HexFingerprint helper
