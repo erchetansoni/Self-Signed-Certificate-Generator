@@ -178,70 +178,90 @@ The interactive terminal form guides you through:
 
 ### Non-Interactive / CLI Mode Examples
 
-#### Example 1: Generate a New Root CA + Signed Leaf Certificate
+### Non-Interactive / CLI Mode Examples
+
+Both **long flags (`--flag`)** and **single-letter shortcuts (`-f`)** are supported interchangeably, alongside both `-flag=value` and `-flag value` syntax.
+
+#### Example 1: Generate a New Root CA + Signed Leaf Certificate (Long Flags)
 ```bash
-./dist/certgen-windows-amd64.exe -non-interactive \
-  -role ca-leaf \
-  -cn "app.internal" \
-  -ca-cn "Internal Development Root CA" \
-  -ca-years 10 \
-  -san-dns "app.internal,*.app.internal,localhost" \
-  -san-ip "127.0.0.1,10.0.0.1" \
-  -key-type "ecdsa-p256" \
-  -days 365 \
-  -out-dir "./certs" \
-  -p12 \
-  -p12-pass "Secret123!" \
-  -install-os \
-  -install-browser
+./dist/certgen-windows-amd64.exe --non-interactive \
+  --role ca-leaf \
+  --cn "app.internal" \
+  --ca-cn "Internal Development Root CA" \
+  --ca-years 10 \
+  --san-dns "app.internal,*.app.internal,localhost" \
+  --san-ip "127.0.0.1,10.0.0.1" \
+  --key-type "ecdsa-p256" \
+  --days 365 \
+  --out-dir "./certs" \
+  --p12 \
+  --p12-pass "Secret123!" \
+  --install-os \
+  --install-browser
 ```
 
-#### Example 2: Sign a New Certificate with an Existing Root CA
+#### Example 2: Quick Generation with Single-Letter Shortcuts
 ```bash
-./dist/certgen-windows-amd64.exe -non-interactive \
-  -role existing-ca \
-  -ca-cert "./certs/rootCA.pem" \
-  -ca-key "./certs/rootCA-key.pem" \
-  -cn "billing.internal" \
-  -san-dns "billing.internal,localhost" \
-  -days 365 \
-  -out-dir "./billing-certs"
+./dist/certgen-windows-amd64.exe -b \
+  -r ca-leaf \
+  --cn "app.internal" \
+  -d 365 \
+  -y 10 \
+  --dns "app.internal,localhost" \
+  --ip "127.0.0.1" \
+  --out-dir "./certs"
+```
+
+#### Example 3: Sign a New Certificate with an Existing Root CA
+```bash
+./dist/certgen-windows-amd64.exe -b \
+  -r existing-ca \
+  --ca-cert "./certs/rootCA.pem" \
+  --ca-key "./certs/rootCA-key.pem" \
+  --cn "billing.internal" \
+  --dns "billing.internal,localhost" \
+  -d 365 \
+  --out-dir "./billing-certs"
 ```
 
 ---
 
 ### CLI Flags Reference
 
-| Flag | Default | Description |
-|---|---|---|
-| `-role` | `ca-leaf` | Certificate mode: `ca-leaf` (New CA + Leaf), `existing-ca` (Sign with Existing CA), `ca` (CA only), `leaf` (self-signed leaf) |
-| `-cn` | `""` | Common Name (CN) [Mandatory in non-interactive mode] |
-| `-ca-cn` | `"<CN> Root CA"` | Root CA Common Name (when generating a new CA) |
-| `-ca-years` | `10` | **Root CA validity duration in YEARS** (default: 10 years, e.g. 5, 10, 20, 30) |
-| `-ca-days` | `0` | Root CA validity duration in days (overrides `-ca-years` if specified) |
-| `-ca-cert` | `""` | **Path to existing Root CA certificate** (e.g. `./rootCA.pem`) |
-| `-ca-key` | `""` | **Path to existing Root CA private key** (e.g. `./rootCA-key.pem`) |
-| `-ca-pass` | `""` | Passphrase for existing Root CA private key (if encrypted) |
-| `-key-type` | `ecdsa-p256` | Key type: `ecdsa-p256`, `ecdsa-p384`, `rsa-2048`, `rsa-4096` |
-| `-o` | `Internal / Dev` | Organization (O) |
-| `-ou` | `""` | Organizational Unit (OU) |
-| `-c` | `US` | 2-letter ISO 3166-1 country code |
-| `-san-dns` | `""` | Comma-separated DNS SANs |
-| `-san-ip` | `""` | Comma-separated IP SANs |
-| `-days` | `365` | **Leaf certificate validity duration in DAYS** (default: 365 days / 1 year) |
-| `-out-dir` | `./` | Output directory for all generated files |
-| `-ca-name` | `rootCA.pem` | Root CA certificate filename |
-| `-ca-key-name` | `rootCA-key.pem` | Root CA private key filename |
-| `-cert-name` | `cert.pem` | Leaf certificate filename |
-| `-key-name` | `key.pem` | Leaf private key filename |
-| `-chain-name`| `chain.pem` | Full chain filename |
-| `-p12` | `false` | Enable PKCS#12 bundle generation |
-| `-p12-name` | `bundle.p12` | PKCS#12 bundle filename |
-| `-p12-pass` | `""` | Export password for PKCS#12 bundle |
-| `-install-os` | `false` | Install Root CA into OS / system trust store |
-| `-install-browser`| `false`| Install Root CA for Chrome, Edge, and Firefox |
-| `-non-interactive`| `false` | Run in non-interactive CLI mode |
-| `-version` | `false` | Display version, author, and licensing metadata |
+All flags can be supplied with either `--flag` (standard) or `-flag`, and single-letter aliases (`-f`) are provided for common actions.
+
+| Long Flag | Short Alias | Default | Description |
+|---|---|---|---|
+| `--role` | `-r` | `ca-leaf` | Certificate mode: `ca-leaf` (New CA + Leaf), `existing-ca` (Sign with Existing CA), `ca` (CA only), `leaf` (self-signed leaf) |
+| `--cn` | `--common-name` | `""` | **Common Name (CN)** [Mandatory in non-interactive mode, e.g. `localhost`, `app.internal`] |
+| `--days` | `-d` | `365` | **Leaf validity in DAYS** [default: 365 days / 1 year] |
+| `--key-type` | `-k` | `ecdsa-p256` | Key type: `ecdsa-p256`, `ecdsa-p384`, `rsa-2048`, `rsa-4096` |
+| `--ca-years` | `-y`, `--years` | `10` | **Root CA validity in YEARS** [default: 10 years, e.g. 5, 10, 20, 30] |
+| `--ca-days` | | `0` | Root CA validity in days (overrides `--ca-years` if specified) |
+| `--ca-cn` | | `"<CN> Root CA"` | Root CA Common Name (when generating a new Root CA) |
+| `--ca-cert` | | `""` | **Path to existing Root CA certificate** (e.g. `./rootCA.pem`) |
+| `--ca-key` | | `""` | **Path to existing Root CA private key** (e.g. `./rootCA-key.pem`) |
+| `--ca-pass` | | `""` | Passphrase for existing Root CA private key (if encrypted) |
+| `--san-dns` | `--dns` | `""` | Comma-separated DNS SANs (e.g. `localhost,*.internal.dev`) |
+| `--san-ip` | `--ip` | `""` | Comma-separated IP SANs (e.g. `127.0.0.1,10.0.0.1`) |
+| `--org` | `-o`, `--organization` | `Internal / Dev` | Subject Organization (O) |
+| `--ou` | | `""` | Subject Organizational Unit (OU) |
+| `--country` | `-c` | `US` | Subject Country code (2-letter ISO 3166-1) |
+| `--out-dir` | `--output`, `-out` | `./` | Output directory for all generated files |
+| `--cert-name` | | `cert.pem` | Leaf certificate filename |
+| `--key-name` | | `key.pem` | Leaf private key filename |
+| `--ca-name` | | `rootCA.pem` | Root CA certificate filename |
+| `--ca-key-name`| | `rootCA-key.pem` | Root CA private key filename |
+| `--chain-name` | | `chain.pem` | Full chain filename |
+| `--p12` | `--pfx` | `false` | Enable PKCS#12 bundle generation |
+| `--p12-name` | | `bundle.p12` | PKCS#12 bundle filename |
+| `--p12-pass` | | `""` | Password for PKCS#12 bundle |
+| `--key-format` | | `pkcs8` | Private key format: `pkcs8` or `traditional` |
+| `--install-os` | | `false` | Install Root CA into OS / system trust store |
+| `--install-browser`| | `false`| Install Root CA for Chrome, Edge, and Firefox |
+| `--non-interactive`| `-b`, `--batch` | `false` | Run in non-interactive / headless CLI mode |
+| `--version` | `-v` | `false` | Display version, author, and licensing metadata |
+| `--help` | `-h` | `false` | Display command usage and examples |
 
 ---
 
