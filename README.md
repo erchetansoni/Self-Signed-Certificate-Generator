@@ -280,7 +280,41 @@ If you distribute `rootCA.pem` / `rootCA.crt` to other machines, use these nativ
 
 ---
 
-## 8. Author & Personal Branding
+## 8. Automated Releases & CI/CD Pipeline
+
+The repository includes a GitHub Actions release pipeline (`.github/workflows/release.yml`) that automates cross-compilation, SHA256 checksum generation, and GitHub Releases:
+
+### A. Production LTS Releases (`main` branch)
+- Triggered whenever code is pushed or merged into the **`main`** branch.
+- Marked as the **Latest LTS Release** (`--latest`).
+- Tag format: `v<VERSION>` (e.g., `v1.2.0` derived from `VERSION` or `main.go`).
+- Title: `Self-Signed Certificate Generator v1.2.0 (LTS)`
+- Publishes pre-compiled static binaries for Windows, Linux, and macOS.
+
+### B. Pre-Releases (`dev` branch)
+- Triggered whenever code is pushed or merged into the **`dev`** branch.
+- Marked as a **Pre-release** (`--prerelease`).
+- **Automatic Versioning via Pull Request Number:**
+  - If the commit was merged from a Pull Request (e.g., PR #42):  
+    Tag: `v1.2.0-dev.pr42.<run_number>`  
+    Title: `Self-Signed Certificate Generator v1.2.0-pr.42 (Pre-release)`
+  - If pushed directly without a PR:  
+    Tag: `v1.2.0-dev.b<run_number>`  
+    Title: `Self-Signed Certificate Generator v1.2.0-dev (Build <run_number>)`
+
+### C. Release Artifacts Generated
+Each release automatically compiles and bundles:
+- `certgen-windows-amd64.exe` (Windows 10/11/Server x86-64 with embedded PE metadata)
+- `certgen-windows-arm64.exe` (Windows on ARM64)
+- `certgen-linux-amd64` (Linux 64-bit statically linked ELF)
+- `certgen-linux-arm64` (Linux ARM64 / Graviton / Raspberry Pi)
+- `certgen-darwin-amd64` (macOS Intel x86_64)
+- `certgen-darwin-arm64` (macOS Apple Silicon M1/M2/M3/M4)
+- `checksums.txt` (SHA256 integrity digests for all binaries)
+
+---
+
+## 9. Author & Personal Branding
 
 Developed and maintained by **Er. Chetan Soni**:
 - **Website & Portfolio:** [https://ErChetanSoni.github.io/](https://ErChetanSoni.github.io/)
@@ -288,7 +322,7 @@ Developed and maintained by **Er. Chetan Soni**:
 
 ---
 
-## 9. Building from Source
+## 10. Building from Source
 
 ### Prerequisites
 - Go 1.22+ (stable release)
@@ -313,7 +347,7 @@ All build scripts compile Windows PE resource manifests (`winres.json`), build s
 
 ---
 
-## 10. License & Dual-Licensing
+## 11. License & Dual-Licensing
 
 This project is dual-licensed under:
 1. **GNU General Public License v3.0 (GPLv3)** for open-source and personal use.
