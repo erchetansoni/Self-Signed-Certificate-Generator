@@ -98,6 +98,68 @@ CertGen provides child-process-free, native installation of the Root CA into OS 
 
 ---
 
+### Reference: Where Certificates & Private Keys Are Stored
+
+Unlike simple file-based assumptions, different operating systems and browsers store certificates and cryptographic keys across distinct registries, databases, and filesystem paths:
+
+#### 1. Windows (Registry & DPAPI Disk Locations)
+
+Windows separates the public certificate from the private key:
+
+* **Public Certificates (Registry):**
+  * **Current User Root CAs:**  
+    `HKEY_CURRENT_USER\Software\Microsoft\SystemCertificates\Root\Certificates\<Thumbprint>`
+  * **Current User Personal / Leaf Certs:**  
+    `HKEY_CURRENT_USER\Software\Microsoft\SystemCertificates\My\Certificates\<Thumbprint>`
+  * **Local Machine (System-Wide) Root CAs:**  
+    `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SystemCertificates\Root\Certificates\<Thumbprint>`
+  * **Local Machine Personal / Leaf Certs:**  
+    `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SystemCertificates\My\Certificates\<Thumbprint>`
+  * **Group Policy Pushed Certificates:**  
+    `HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\SystemCertificates\Root\Certificates\`
+
+* **Private Keys (Filesystem - Encrypted via Windows DPAPI):**
+  * **Modern CNG Keys (ECDSA P-256/P-384, modern RSA):**
+    * User Keys: `%APPDATA%\Microsoft\Crypto\Keys\`
+    * Machine Keys: `%PROGRAMDATA%\Microsoft\Crypto\Keys\` and `%PROGRAMDATA%\Microsoft\Crypto\SystemKeys\`
+  * **Legacy CryptoAPI Keys (CAPI 1.0 RSA):**
+    * User Keys: `%APPDATA%\Microsoft\Crypto\RSA\<User-SID>\`
+    * Machine Keys: `%PROGRAMDATA%\Microsoft\Crypto\RSA\MachineKeys\`
+
+* **PowerShell Virtual Store Providers:**
+  * User Store: `Cert:\CurrentUser\Root\` and `Cert:\CurrentUser\My\`
+  * Machine Store: `Cert:\LocalMachine\Root\` and `Cert:\LocalMachine\My\`
+
+#### 2. Linux (Distribution Trust Anchors & Bundles)
+
+Linux distributions store trusted CA anchors in specific source directories and compile them into aggregated bundle files:
+
+| Distribution | Source Directory (Add Custom Root CAs Here) | Compiled System Bundle (Used by curl, python, git, openssl) | Update Command |
+|:---|:---|:---|:---|
+| **Ubuntu / Debian** | `/usr/local/share/ca-certificates/*.crt` | `/etc/ssl/certs/ca-certificates.crt` | `sudo update-ca-certificates` |
+| **RHEL / CentOS / Fedora / Rocky / Alma** | `/etc/pki/ca-trust/source/anchors/*.crt` | `/etc/pki/tls/certs/ca-bundle.crt` or `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` | `sudo update-ca-trust` |
+| **Alpine Linux** | `/usr/local/share/ca-certificates/*.crt` | `/etc/ssl/cert.pem` | `update-ca-certificates` |
+| **Arch Linux** | `/etc/ca-certificates/trust-source/anchors/*.crt` | `/etc/ssl/certs/ca-certificates.crt` | `sudo trust extract-compat` |
+| **OpenSUSE / SLES** | `/etc/pki/trust/anchors/*.crt` | `/var/lib/ca-certificates/ca-bundle.pem` | `sudo update-ca-certificates` |
+
+#### 3. macOS (Keychains)
+* **System Keychain (Machine-Wide):** `/Library/Keychains/System.keychain`
+* **Login Keychain (Per-User):** `~/Library/Keychains/login.keychain-db`
+* **System Root Certificates (Read-Only Apple Roots):** `/System/Library/Keychains/SystemRootCertificates.keychain`
+* **CLI Inspection:** `security find-certificate -a -c "Your CA Name" /Library/Keychains/System.keychain`
+
+#### 4. Web Browsers
+* **Google Chrome & Microsoft Edge (Windows):** Query the Windows CryptoAPI directly (`CurrentUser\Root` and `LocalMachine\Root`). No separate browser database.
+* **Google Chrome & Microsoft Edge (Linux):** Query the system CA bundle and user NSS database at `~/.pki/nssdb`.
+* **Mozilla Firefox (Windows / Linux / macOS):**
+  * Maintains its own internal NSS database:
+    * Windows: `%APPDATA%\Mozilla\Firefox\Profiles\<profile-id>\cert9.db`
+    * Linux: `~/.mozilla/firefox/<profile-id>/cert9.db`
+    * macOS: `~/Library/Application Support/Firefox/Profiles/<profile-id>/cert9.db`
+  * When `security.enterprise_roots.enabled` is set to `true` (via `user.js` or `policies.json`), Firefox automatically queries the OS root store in addition to `cert9.db`.
+
+---
+
 ## 5. How to Run the Binaries
 
 The compiled executables are located in the `dist/` directory:
