@@ -1,0 +1,230 @@
+name: CI & Automated Release
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  test:
+    name: Run Unit & Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Run Tests
+        run: |
+          go test -v ./...
+
+  build-and-release:
+    name: Build Binaries & Publish Release
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Install Windows PE Resource Tool (go-winres)
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+
+      - name: Compile Windows PE Metadata & Manifest
+        run: |
+          go-winres make --in winres/winres.json
+
+      - name: Compile Cross-Platform Binaries
+        run: |
+          mkdir -p dist
+
+          echo "Compiling Windows AMD64..."
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/certgen-windows-amd64.exe .
+
+          echo "Compiling Windows ARM64..."
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/certgen-windows-arm64.exe .
+
+          echo "Compiling Linux AMD64..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/certgen-linux-amd64 .
+          chmod +x dist/certgen-linux-amd64
+
+          echo "Compiling Linux ARM64..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/certgen-linux-arm64 .
+          chmod +x dist/certgen-linux-arm64
+
+          echo "Compiling macOS Intel (AMD64)..."
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/certgen-darwin-amd64 .
+          chmod +x dist/certgen-darwin-amd64
+
+          echo "Compiling macOS Apple Silicon (ARM64)..."
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/certgen-darwin-arm64 .
+          chmod +x dist/certgen-darwin-arm64
+
+      - name: Generate SHA256 Checksums
+        run: |
+          cd dist
+          sha256sum certgen-* > checksums.txt
+          cat checksums.txt
+          cd ..
+
+      - name: Determine Version & Release Configuration
+        id: release_meta
+        run: |
+          # 1. Read Base Version from VERSION or main.go
+          if [ -f VERSION ]; then
+            BASE_VERSION=$(tr -d ' \r\n' < VERSION)
+          else
+            BASE_VERSION=$(grep -oP 'Version\s*=\s*"\K[^"]+' main.go || echo "1.2.0")
+          fi
+
+          BRANCH_NAME="${GITHUB_REF_NAME}"
+          COMMIT_SHA="${GITHUB_SHA}"
+          RUN_NUM="${GITHUB_RUN_NUMBER}"
+
+          echo "Base Version: ${BASE_VERSION}"
+          echo "Branch: ${BRANCH_NAME}"
+          echo "Commit: ${COMMIT_SHA}"
+
+          if [ "${BRANCH_NAME}" = "main" ]; then
+            # Production LTS Release
+            TAG_NAME="v${BASE_VERSION}"
+            RELEASE_TITLE="Self-Signed Certificate Generator v${BASE_VERSION} (LTS)"
+            IS_PRERELEASE="false"
+            LATEST_FLAG="--latest"
+            RELEASE_TYPE="LTS Production Release"
+          else
+            # Pre-release on dev branch
+            IS_PRERELEASE="true"
+            LATEST_FLAG="--latest=false"
+            RELEASE_TYPE="Development Pre-Release"
+
+            # Check if commit is linked to a Pull Request
+            COMMIT_MSG=$(git log -1 --pretty=%B)
+            PR_NUM=$(echo "$COMMIT_MSG" | grep -oP '(?<=#)\d+' | head -n 1 || true)
+
+            if [ -z "$PR_NUM" ]; then
+              # Attempt lookup via GitHub CLI
+              API_PR=$(gh api repos/${{ github.repository }}/commits/${COMMIT_SHA}/pulls --jq '.[0].number' 2>/dev/null || true)
+              if [ -n "$API_PR" ] && [ "$API_PR" != "null" ]; then
+                PR_NUM="$API_PR"
+              fi
+            fi
+
+            if [ -n "$PR_NUM" ]; then
+              echo "Detected Pull Request #${PR_NUM}"
+              TAG_NAME="v${BASE_VERSION}-dev.pr${PR_NUM}.${RUN_NUM}"
+              RELEASE_TITLE="Self-Signed Certificate Generator v${BASE_VERSION}-pr.${PR_NUM} (Pre-release)"
+            else
+              echo "No PR detected, using build number"
+              TAG_NAME="v${BASE_VERSION}-dev.b${RUN_NUM}"
+              RELEASE_TITLE="Self-Signed Certificate Generator v${BASE_VERSION}-dev (Build ${RUN_NUM})"
+            fi
+          fi
+
+          echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "RELEASE_TITLE=${RELEASE_TITLE}" >> $GITHUB_OUTPUT
+          echo "IS_PRERELEASE=${IS_PRERELEASE}" >> $GITHUB_OUTPUT
+          echo "LATEST_FLAG=${LATEST_FLAG}" >> $GITHUB_OUTPUT
+          echo "RELEASE_TYPE=${RELEASE_TYPE}" >> $GITHUB_OUTPUT
+          echo "BASE_VERSION=${BASE_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Generate Release Notes
+        run: |
+          cat << 'EOF' > release_notes.md
+          # ${{ steps.release_meta.outputs.RELEASE_TITLE }}
+
+          > **Author:** [Er. Chetan Soni](https://ErChetanSoni.github.io/)  
+          > **Release Type:** ${{ steps.release_meta.outputs.RELEASE_TYPE }}  
+          > **Commit:** \`${{ github.sha }}\`  
+          > **License:** [GNU GPLv3](LICENSE) / [Commercial License](LICENSE-COMMERCIAL.md)
+
+          ---
+
+          ### 📦 Download Pre-Compiled Binaries
+
+          | Platform | Architecture | Binary |
+          |:---|:---|:---|
+          | **Windows** | AMD64 (64-bit Intel/AMD) | [`certgen-windows-amd64.exe`](https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/certgen-windows-amd64.exe) |
+          | **Windows** | ARM64 (Snapdragon / Surface) | [`certgen-windows-arm64.exe`](https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/certgen-windows-arm64.exe) |
+          | **Linux** | AMD64 (Ubuntu/Debian/RHEL/CentOS) | [`certgen-linux-amd64`](https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/certgen-linux-amd64) |
+          | **Linux** | ARM64 (Raspberry Pi, Graviton) | [`certgen-linux-arm64`](https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/certgen-linux-arm64) |
+          | **macOS** | Intel x86_64 | [`certgen-darwin-amd64`](https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/certgen-darwin-amd64) |
+          | **macOS** | Apple Silicon (M1/M2/M3/M4) | [`certgen-darwin-arm64`](https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/certgen-darwin-arm64) |
+
+          ---
+
+          ### 🔒 Security & Air-Gap Verification
+          - **Zero External Runtime Dependencies:** No OpenSSL, Python, or dynamic C libraries required. Statically linked with \`CGO_ENABLED=0\`.
+          - **EDR & Antivirus Safe:** Zero socket listeners, zero child processes spawned. Windows PE resource manifest embedded with \`asInvoker\` privilege.
+          - **Full PKI Hierarchy:** Generates Root CA (in Years) + signed Leaf certificates, and supports signing with existing Root CAs.
+          - **OS & Browser Trust:** Child-process-free installation into Windows CryptoAPI, Linux trust anchors, Chrome, Edge, and Firefox.
+
+          ---
+
+          ### 📋 SHA256 Checksums
+          \`\`\`
+          EOF
+          cat dist/checksums.txt >> release_notes.md
+          cat << 'EOF' >> release_notes.md
+          \`\`\`
+
+          ---
+          *Developed with ❤️ by [Er. Chetan Soni](https://ErChetanSoni.github.io/)*
+          EOF
+
+      - name: Publish GitHub Release
+        run: |
+          TAG="${{ steps.release_meta.outputs.TAG_NAME }}"
+          TITLE="${{ steps.release_meta.outputs.RELEASE_TITLE }}"
+          PRERELEASE_OPT=""
+          if [ "${{ steps.release_meta.outputs.IS_PRERELEASE }}" = "true" ]; then
+            PRERELEASE_OPT="--prerelease"
+          fi
+
+          LATEST_OPT="${{ steps.release_meta.outputs.LATEST_FLAG }}"
+
+          echo "Target tag: $TAG"
+          echo "Title: $TITLE"
+          echo "Prerelease option: $PRERELEASE_OPT"
+          echo "Latest option: $LATEST_OPT"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, updating assets and notes..."
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file release_notes.md $PRERELEASE_OPT $LATEST_OPT
+          else
+            echo "Creating new release $TAG..."
+            gh release create "$TAG" dist/* \
+              --title "$TITLE" \
+              --notes-file release_notes.md \
+              --target "${{ github.sha }}" \
+              $PRERELEASE_OPT \
+              $LATEST_OPT
+          fi
+
