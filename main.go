@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Er. Chetan Soni (https://ErChetanSoni.github.io/)
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+
 package main
 
 import (
@@ -12,8 +15,11 @@ import (
 )
 
 const (
+	AppName   = "Self-Signed Certificate Generator"
 	Version   = "1.2.0"
-	AppTitle  = "CertGen - Air-Gapped EDR-Safe PKI & X.509 Certificate Generator"
+	Author    = "Er. Chetan Soni"
+	Website   = "https://ErChetanSoni.github.io/"
+	License   = "GNU GPLv3 / Commercial Dual-License"
 	BuildDate = "2026"
 )
 
@@ -49,15 +55,17 @@ func main() {
 	installOS := flagSet.Bool("install-os", false, "Install Root CA into OS / system trust store")
 	installBrowser := flagSet.Bool("install-browser", false, "Install Root CA for Chrome, Edge, and Firefox")
 	nonInteractive := flagSet.Bool("non-interactive", false, "Run in non-interactive / headless CLI mode")
-	showVersion := flagSet.Bool("version", false, "Print version and build metadata")
+	showVersion := flagSet.Bool("version", false, "Print version, author, and licensing metadata")
 
 	if err := flagSet.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
 
 	if *showVersion {
-		fmt.Printf("%s v%s (%s)\n", AppTitle, Version, BuildDate)
-		fmt.Println("Design: Zero runtime sockets, zero child processes, offline air-gap safe, full PKI & Existing CA support.")
+		fmt.Printf("%s v%s (%s)\n", AppName, Version, BuildDate)
+		fmt.Printf("Author:  %s (%s)\n", Author, Website)
+		fmt.Printf("License: %s\n", License)
+		fmt.Println("Design:  Zero runtime sockets, zero child processes, offline air-gap safe, full PKI & Existing CA support.")
 		return
 	}
 

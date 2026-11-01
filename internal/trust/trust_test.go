@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Er. Chetan Soni (https://ErChetanSoni.github.io/)
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+
 package trust
 
 import (

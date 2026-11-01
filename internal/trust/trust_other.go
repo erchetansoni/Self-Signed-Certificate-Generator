@@ -1,5 +1,8 @@
 //go:build !windows && !linux
 
+// Copyright (c) 2026 Er. Chetan Soni (https://ErChetanSoni.github.io/)
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+
 package trust
 
 // InstallRootCA provides fallback and instructions for other operating systems (e.g. macOS, BSD).

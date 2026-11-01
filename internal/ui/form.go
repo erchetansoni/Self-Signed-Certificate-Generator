@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Er. Chetan Soni (https://ErChetanSoni.github.io/)
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+
 package ui
 
 import (
@@ -38,7 +41,7 @@ type FormData struct {
 	InstallBrowsers     bool
 }
 
-// Banner returns the styled application header.
+// Banner returns the styled application header with personal branding.
 func Banner() string {
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -56,10 +59,20 @@ func Banner() string {
 		Bold(true).
 		SetString("[EDR-Safe / Air-Gapped / Zero-Network / Full PKI]")
 
-	header := fmt.Sprintf("%s  %s\n%s\n",
-		titleStyle.Render("CERTGEN"),
+	authorBadge := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#00D7D7")).
+		Bold(true)
+
+	linkStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFD700")).
+		Underline(true)
+
+	header := fmt.Sprintf("%s  %s\n%s\n%s %s\n",
+		titleStyle.Render("SELF-SIGNED CERTIFICATE GENERATOR"),
 		secBadge.Render(),
-		subTitleStyle.Render("Production-Grade Self-Signed X.509 PKI & Certificate Authority Generator"),
+		subTitleStyle.Render("Production-Grade Offline X.509 PKI & Certificate Authority Generator"),
+		authorBadge.Render("Created by Er. Chetan Soni:"),
+		linkStyle.Render("https://ErChetanSoni.github.io/"),
 	)
 	return header
 }
@@ -584,6 +597,11 @@ func DisplaySuccess(res *cert.Result, report *trust.InstallReport) {
 			}
 		}
 	}
+
+	footerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Italic(true)
+	sb.WriteString(fmt.Sprintf("\n%s\n", footerStyle.Render("Self-Signed Certificate Generator • Er. Chetan Soni (https://ErChetanSoni.github.io/) • Dual-licensed under GPLv3 & Commercial")))
 
 	fmt.Println(boxStyle.Render(sb.String()))
 }
